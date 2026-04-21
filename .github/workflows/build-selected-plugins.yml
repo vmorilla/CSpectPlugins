@@ -1,12 +1,8 @@
-name: Build Selected Plugins
+name: Build All Plugins
 
 on:
   workflow_dispatch:
     inputs:
-      plugins:
-        description: "Comma-separated plugin ids (or 'all')."
-        required: true
-        default: "all"
       configuration:
         description: "Build configuration"
         required: true
@@ -23,11 +19,10 @@ on:
       - ".github/workflows/build-selected-plugins.yml"
 
 jobs:
-  build-selected-plugins:
+  build-all-plugins:
     runs-on: windows-latest
     env:
       BUILD_CONFIGURATION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.configuration || 'Release' }}
-      REQUESTED_PLUGINS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.plugins || 'all' }}
 
     steps:
       - name: Checkout
@@ -39,8 +34,7 @@ jobs:
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
 
-      - name: Build selected plugins
-        id: build
+      - name: Build all plugins
         shell: pwsh
         run: |
           $pluginMap = [ordered]@{
@@ -56,29 +50,8 @@ jobs:
             spriteviewer = "SpriteViewer/SpriteViewer.csproj"
           }
 
-          $requestedRaw = "${env:REQUESTED_PLUGINS}"
-          if ([string]::IsNullOrWhiteSpace($requestedRaw)) {
-            $requestedRaw = "all"
-          }
-
-          $requested = $requestedRaw.Split(',') |
-            ForEach-Object { $_.Trim().ToLowerInvariant() } |
-            Where-Object { $_ -ne "" }
-
-          if ($requested -contains "all") {
-            $selected = @($pluginMap.Keys)
-          }
-          else {
-            $unknown = @($requested | Where-Object { -not $pluginMap.Contains($_) })
-            if ($unknown.Count -gt 0) {
-              $valid = $pluginMap.Keys -join ", "
-              throw "Unknown plugin ids: $($unknown -join ', '). Valid ids: $valid"
-            }
-
-            $selected = @($requested | Select-Object -Unique)
-          }
-
-          Write-Host "Selected plugins: $($selected -join ', ')"
+          $selected = @($pluginMap.Keys)
+          Write-Host "Building all plugins: $($selected -join ', ')"
 
           foreach ($plugin in $selected) {
             $projectPath = $pluginMap[$plugin]
@@ -99,8 +72,6 @@ jobs:
             }
           }
 
-          "selected_plugins=$($selected -join ',')" >> $env:GITHUB_OUTPUT
-
       - name: Collect build artifacts
         shell: pwsh
         run: |
@@ -117,9 +88,7 @@ jobs:
             spriteviewer = "SpriteViewer"
           }
 
-          $selected = "${{ steps.build.outputs.selected_plugins }}".Split(',') |
-            ForEach-Object { $_.Trim().ToLowerInvariant() } |
-            Where-Object { $_ -ne "" }
+          $selected = @($pluginMap.Keys)
 
           New-Item -ItemType Directory -Path artifacts -Force | Out-Null
 
