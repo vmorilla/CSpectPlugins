@@ -1,0 +1,147 @@
+name: Build Selected Plugins
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugins:
+        description: "Comma-separated plugin ids (or 'all')."
+        required: true
+        default: "all"
+      configuration:
+        description: "Build configuration"
+        required: true
+        type: choice
+        options:
+          - Release
+          - Debug
+        default: Release
+  push:
+    paths:
+      - "**/*.cs"
+      - "**/*.csproj"
+      - "**/*.sln"
+      - ".github/workflows/build-selected-plugins.yml"
+
+jobs:
+  build-selected-plugins:
+    runs-on: windows-latest
+    env:
+      BUILD_CONFIGURATION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.configuration || 'Release' }}
+      REQUESTED_PLUGINS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.plugins || 'all' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Build selected plugins
+        id: build
+        shell: pwsh
+        run: |
+          $pluginMap = [ordered]@{
+            copperdissassembler = "CopperDissassembler/CopperDissassembler.csproj"
+            debugout = "DebugOut/DebugOut.csproj"
+            dezogplugin = "DeZogPlugin/DeZogPlugin.csproj"
+            esxdos = "esxDOS/esxDOS.csproj"
+            fileassociate = "FileAssociate/FileAssociate.csproj"
+            i2c_sample = "i2C_Sample/i2C_Sample.csproj"
+            memoryviewer = "MemoryViewer/MemoryViewer.csproj"
+            nextregisterviewer = "NextRegisterViewer/NextRegisterViewer.csproj"
+            profiler = "Profiler/Profiler.csproj"
+            spriteviewer = "SpriteViewer/SpriteViewer.csproj"
+          }
+
+          $requestedRaw = "${env:REQUESTED_PLUGINS}"
+          if ([string]::IsNullOrWhiteSpace($requestedRaw)) {
+            $requestedRaw = "all"
+          }
+
+          $requested = $requestedRaw.Split(',') |
+            ForEach-Object { $_.Trim().ToLowerInvariant() } |
+            Where-Object { $_ -ne "" }
+
+          if ($requested -contains "all") {
+            $selected = @($pluginMap.Keys)
+          }
+          else {
+            $unknown = @($requested | Where-Object { -not $pluginMap.Contains($_) })
+            if ($unknown.Count -gt 0) {
+              $valid = $pluginMap.Keys -join ", "
+              throw "Unknown plugin ids: $($unknown -join ', '). Valid ids: $valid"
+            }
+
+            $selected = @($requested | Select-Object -Unique)
+          }
+
+          Write-Host "Selected plugins: $($selected -join ', ')"
+
+          foreach ($plugin in $selected) {
+            $projectPath = $pluginMap[$plugin]
+            if (-not (Test-Path $projectPath)) {
+              throw "Project file not found: $projectPath"
+            }
+
+            Write-Host "Restoring: $projectPath"
+            nuget restore $projectPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "NuGet restore failed for $projectPath"
+            }
+
+            Write-Host "Building: $projectPath"
+            msbuild $projectPath /m /t:Build /p:Configuration=${env:BUILD_CONFIGURATION} /p:Platform=AnyCPU /verbosity:minimal
+            if ($LASTEXITCODE -ne 0) {
+              throw "Build failed for $projectPath"
+            }
+          }
+
+          "selected_plugins=$($selected -join ',')" >> $env:GITHUB_OUTPUT
+
+      - name: Collect build artifacts
+        shell: pwsh
+        run: |
+          $pluginMap = @{
+            copperdissassembler = "CopperDissassembler"
+            debugout = "DebugOut"
+            dezogplugin = "DeZogPlugin"
+            esxdos = "esxDOS"
+            fileassociate = "FileAssociate"
+            i2c_sample = "i2C_Sample"
+            memoryviewer = "MemoryViewer"
+            nextregisterviewer = "NextRegisterViewer"
+            profiler = "Profiler"
+            spriteviewer = "SpriteViewer"
+          }
+
+          $selected = "${{ steps.build.outputs.selected_plugins }}".Split(',') |
+            ForEach-Object { $_.Trim().ToLowerInvariant() } |
+            Where-Object { $_ -ne "" }
+
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+
+          foreach ($plugin in $selected) {
+            $root = $pluginMap[$plugin]
+            $outputDir = Join-Path $root ("bin/{0}" -f $env:BUILD_CONFIGURATION)
+            if (-not (Test-Path $outputDir)) {
+              Write-Warning "Output folder not found: $outputDir"
+              continue
+            }
+
+            $dest = Join-Path "artifacts" $plugin
+            New-Item -ItemType Directory -Path $dest -Force | Out-Null
+
+            Get-ChildItem -Path $outputDir -File |
+              Where-Object { $_.Extension -in @('.dll', '.pdb', '.config', '.exe') } |
+              Copy-Item -Destination $dest -Force
+          }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-${{ env.BUILD_CONFIGURATION }}-${{ github.run_number }}
+          path: artifacts
+          if-no-files-found: error
